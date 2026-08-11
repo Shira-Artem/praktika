@@ -8,9 +8,9 @@
 
 | | |
 |---|---|
-| ![Карта и заказы](docs/screenshots/visual-v2-1440-initial.png) | ![Сравнение маршрутов](docs/screenshots/visual-v2-1440-route.png) |
-| ![Невозможная доставка 185 кг](docs/screenshots/visual-v2-1440-185kg.png) | ![Активная миссия](docs/screenshots/visual-v2-1440-mission.png) |
-| ![Параллельные миссии](docs/screenshots/visual-v2-1440-parallel.png) | ![Результат доставки](docs/screenshots/visual-v2-1440-result.png) |
+| ![Карта и заказы](docs/screenshots/ui-current-initial.png) | ![Сравнение маршрутов](docs/screenshots/ui-current-routes.png) |
+| ![Невозможная доставка 185 кг](docs/screenshots/ui-current-impossible.png) | ![Активная миссия](docs/screenshots/ui-current-active.png) |
+| ![Параллельные миссии](docs/screenshots/ui-current-parallel.png) | ![Результат доставки](docs/screenshots/ui-current-result.png) |
 
 ## Что сделано
 
