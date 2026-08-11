@@ -115,6 +115,17 @@ services:
       clickhouse:
         condition: service_healthy
 
+  game-api:
+    build: .
+    command: uvicorn game_api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      GAME_API_DB_PATH: /data/game_api.db
+    volumes:
+      - game_api_data:/data
+    ports:
+      - "8020:8000"
+    restart: unless-stopped
+
   event-generator:
     build: .
     profiles: ["tools"]
@@ -134,13 +145,16 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_GAME_API_MODE: mock
+        VITE_GAME_API_MODE: live
+        VITE_GAME_API_URL: ""
         VITE_EVENT_API_URL: /events
     ports:
       - "8080:80"
     restart: unless-stopped
     depends_on:
       event-api:
+        condition: service_started
+      game-api:
         condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/ || exit 1"]
@@ -150,3 +164,4 @@ services:
 
 volumes:
   clickhouse_data:
+  game_api_data:

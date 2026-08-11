@@ -13,6 +13,8 @@ interface SessionResponse {
   session_id?: string;
 }
 
+const SESSION_STORAGE_KEY = "lunar-dispatch.live-session.v1";
+
 export class HttpGameClient implements GameClient {
   readonly mode = "live" as const;
 
@@ -24,14 +26,45 @@ export class HttpGameClient implements GameClient {
   constructor(private readonly baseUrl: string) {}
 
   async initialize(): Promise<GameState> {
+    const storedSessionId = this.readStoredSessionId();
+    if (storedSessionId) {
+      this.sessionId = storedSessionId;
+      try {
+        const state = await this.getState();
+        this.connectSocket();
+        return state;
+      } catch {
+        // Session unknown to the server (fresh DB, expired demo, etc.) — fall
+        // through and start a new one instead of failing initialize().
+        this.sessionId = null;
+      }
+    }
+
     const session = await this.request<SessionResponse>("/api/game/sessions", {
       method: "POST",
     });
     this.sessionId = session.session_id ?? session.id ?? null;
     if (!this.sessionId) throw new GameClientError("Game API не вернул идентификатор сессии.", "invalid_response");
+    this.persistSessionId(this.sessionId);
     const state = await this.getState();
     this.connectSocket();
     return state;
+  }
+
+  private readStoredSessionId(): string | null {
+    try {
+      return localStorage.getItem(SESSION_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  }
+
+  private persistSessionId(sessionId: string): void {
+    try {
+      localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+    } catch {
+      // Storage can be disabled; live mode still works, just without resume-on-reload.
+    }
   }
 
   getMap(): Promise<GameMap> {

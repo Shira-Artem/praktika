@@ -15,4 +15,5 @@ dist/
 build/
 logs/
 tmp/
+*.db
 
