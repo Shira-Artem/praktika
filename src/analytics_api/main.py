@@ -69,7 +69,7 @@ def create_app(*, settings: Settings | None = None, reader: AnalyticsReader | No
 
     @app.get("/metrics/funnel")
     async def funnel(
-        steps: str = Query(default="gameplay_start,gameplay_win"),
+        steps: str = Query(default="order_selected,delivery_started,delivery_completed"),
         since_hours: int = Query(default=24, ge=1, le=24 * 90),
     ) -> list[dict[str, Any]]:
         try:
@@ -80,6 +80,59 @@ def create_app(*, settings: Settings | None = None, reader: AnalyticsReader | No
                 detail=str(exc),
             ) from exc
         return await app.state.reader.funnel(steps=parsed_steps, since_hours=since_hours)
+
+    @app.get("/metrics/deliveries/overview")
+    async def deliveries_overview(
+        since_hours: int = Query(default=24, ge=1, le=24 * 90),
+        game_id: str = Query(default="lunar_dispatch"),
+    ) -> dict[str, Any]:
+        try:
+            return await app.state.reader.delivery_overview(since_hours=since_hours, game_id=game_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+    @app.get("/metrics/deliveries/rovers")
+    async def deliveries_rovers(
+        since_hours: int = Query(default=24, ge=1, le=24 * 90),
+        game_id: str = Query(default="lunar_dispatch"),
+    ) -> list[dict[str, Any]]:
+        try:
+            return await app.state.reader.rover_efficiency(since_hours=since_hours, game_id=game_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+    @app.get("/metrics/deliveries/routes")
+    async def deliveries_routes(
+        since_hours: int = Query(default=24, ge=1, le=24 * 90),
+        game_id: str = Query(default="lunar_dispatch"),
+        limit: int = Query(default=10, ge=1, le=100),
+    ) -> list[dict[str, Any]]:
+        try:
+            return await app.state.reader.route_popularity(since_hours=since_hours, game_id=game_id, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+    @app.get("/metrics/deliveries/rejections")
+    async def deliveries_rejections(
+        since_hours: int = Query(default=24, ge=1, le=24 * 90),
+        game_id: str = Query(default="lunar_dispatch"),
+    ) -> list[dict[str, Any]]:
+        try:
+            return await app.state.reader.rejection_reasons(since_hours=since_hours, game_id=game_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
 
     return app
 

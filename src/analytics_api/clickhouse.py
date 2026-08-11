@@ -9,6 +9,8 @@ from typing import Any
 from analytics_api.settings import Settings
 
 EVENT_TYPE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
+GAME_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
+DELIVERY_OUTCOME_EVENTS = ("delivery_started", "delivery_completed", "delivery_failed", "delivery_rejected")
 
 
 class AnalyticsReader:
@@ -120,6 +122,85 @@ class AnalyticsReader:
             )
         return result
 
+    async def delivery_overview(self, *, since_hours: int, game_id: str) -> dict[str, Any]:
+        """Lunar-dispatch delivery metrics: how many missions were launched, how many
+        succeeded/failed/were rejected before launch, and the average risk/energy cost
+        the game predicted for the missions it actually started."""
+        validate_game_id(game_id)
+        rows = await self._query_dicts(
+            f"""
+            SELECT
+                countIf(event_type = 'delivery_started') AS deliveries_started,
+                countIf(event_type = 'delivery_completed') AS deliveries_succeeded,
+                countIf(event_type = 'delivery_failed') AS deliveries_failed,
+                countIf(event_type = 'delivery_rejected') AS deliveries_rejected,
+                round(avgIf(JSONExtractFloat(properties, 'risk'), event_type = 'delivery_started'), 4) AS avg_risk,
+                round(avgIf(JSONExtractFloat(properties, 'energy_cost'), event_type = 'delivery_started'), 2) AS avg_energy_cost,
+                round(sumIf(JSONExtractFloat(properties, 'reward'), event_type = 'delivery_completed'), 0) AS credits_from_deliveries
+            FROM game_events
+            WHERE game_id = {_quote_sql_string(game_id)}
+                AND event_type IN {_quote_sql_tuple(DELIVERY_OUTCOME_EVENTS)}
+                AND received_at >= now() - INTERVAL {since_hours} HOUR
+            """
+        )
+        return rows[0] if rows else {}
+
+    async def rover_efficiency(self, *, since_hours: int, game_id: str) -> list[dict[str, Any]]:
+        """Success rate per rover_id, derived from delivery_completed/delivery_failed events."""
+        validate_game_id(game_id)
+        return await self._query_dicts(
+            f"""
+            SELECT
+                JSONExtractString(properties, 'rover_id') AS rover_id,
+                countIf(event_type = 'delivery_completed') AS succeeded,
+                countIf(event_type = 'delivery_failed') AS failed
+            FROM game_events
+            WHERE game_id = {_quote_sql_string(game_id)}
+                AND event_type IN ('delivery_completed', 'delivery_failed')
+                AND received_at >= now() - INTERVAL {since_hours} HOUR
+            GROUP BY rover_id
+            HAVING rover_id != ''
+            ORDER BY succeeded + failed DESC
+            """
+        )
+
+    async def route_popularity(self, *, since_hours: int, game_id: str, limit: int) -> list[dict[str, Any]]:
+        """How often each route_id was actually launched (delivery_started)."""
+        validate_game_id(game_id)
+        return await self._query_dicts(
+            f"""
+            SELECT
+                JSONExtractString(properties, 'route_id') AS route_id,
+                count() AS launches
+            FROM game_events
+            WHERE game_id = {_quote_sql_string(game_id)}
+                AND event_type = 'delivery_started'
+                AND received_at >= now() - INTERVAL {since_hours} HOUR
+            GROUP BY route_id
+            HAVING route_id != ''
+            ORDER BY launches DESC
+            LIMIT {limit}
+            """
+        )
+
+    async def rejection_reasons(self, *, since_hours: int, game_id: str) -> list[dict[str, Any]]:
+        """Why launches were blocked client-side (delivery_rejected.reason_code)."""
+        validate_game_id(game_id)
+        return await self._query_dicts(
+            f"""
+            SELECT
+                JSONExtractString(properties, 'reason_code') AS reason_code,
+                count() AS occurrences
+            FROM game_events
+            WHERE game_id = {_quote_sql_string(game_id)}
+                AND event_type = 'delivery_rejected'
+                AND received_at >= now() - INTERVAL {since_hours} HOUR
+            GROUP BY reason_code
+            HAVING reason_code != ''
+            ORDER BY occurrences DESC
+            """
+        )
+
     async def _query_dicts(self, sql: str) -> list[dict[str, Any]]:
         if self._client is None:
             raise RuntimeError("ClickHouse client is not started")
@@ -144,6 +225,11 @@ def validate_event_types(steps: list[str]) -> None:
         raise ValueError(f"invalid event_type values: {', '.join(invalid_steps)}")
 
 
+def validate_game_id(game_id: str) -> None:
+    if not GAME_ID_PATTERN.fullmatch(game_id):
+        raise ValueError(f"invalid game_id value: {game_id}")
+
+
 def parse_steps(raw_steps: str) -> list[str]:
     steps = [step.strip() for step in raw_steps.split(",") if step.strip()]
     validate_event_types(steps)
@@ -152,6 +238,10 @@ def parse_steps(raw_steps: str) -> list[str]:
 
 def _quote_sql_string(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _quote_sql_tuple(values: tuple[str, ...]) -> str:
+    return "(" + ", ".join(_quote_sql_string(value) for value in values) + ")"
 
 
 def _safe_json_loads(value: Any) -> Any:

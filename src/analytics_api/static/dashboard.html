@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Game Analytics — дашборд</title>
+  <title>Lunar Dispatch — аналитика</title>
   <style>
     :root {
       --bg: #0f1117;
@@ -113,7 +113,7 @@
 <body>
   <header>
     <div>
-      <h1>🎮 Game Analytics — дашборд</h1>
+      <h1>🌕 Lunar Dispatch — аналитика</h1>
       <div class="sub">Обновлено: <span id="updated">—</span></div>
     </div>
     <div class="controls">
@@ -123,10 +123,11 @@
   </header>
 
   <div class="intro">
-    Это витрина аналитики игры. Данные берутся <b>из базы ClickHouse</b> через сервис
-    Analytics API. Каждая строка здесь — доказательство, что событие прошло весь путь:
-    <b>игра → очередь → обработчик → база</b>. Если внизу запустить генератор событий,
-    цифры вырастут прямо на глазах (при включённом автообновлении).
+    Это витрина аналитики игры <b>Lunar Dispatch</b>. Данные берутся <b>из базы ClickHouse</b>
+    через сервис Analytics API. Каждая строка здесь — доказательство, что событие прошло весь путь:
+    <b>игра → Event API → Redpanda → Event Processor → ClickHouse</b>. Играйте на
+    <a href="http://localhost:8080" style="color:var(--accent)">localhost:8080</a> — цифры внизу
+    обновятся сами (при включённом автообновлении).
   </div>
 
   <div id="err" class="error" style="display:none"></div>
@@ -134,25 +135,48 @@
   <div class="section-label">Общие показатели</div>
   <div class="grid" id="cards"></div>
 
-  <div class="section-label">Игровые показатели</div>
-  <div class="grid" id="game-cards"></div>
+  <div class="section-label">Лунная доставка</div>
+  <div class="grid" id="delivery-cards"></div>
 
   <div class="section-label">Детали</div>
 
   <section>
-    <h2>Типы событий</h2>
-    <p class="caption">Из чего состоит поток. Чем длиннее полоса — тем чаще игроки совершают это действие.
-      В живой игре геймплейных событий много, покупок — мало.</p>
-    <div id="types"></div>
+    <h2>Эффективность роверов</h2>
+    <p class="caption">Доля успешных доставок на каждом ровере (<b>delivery_completed</b> против
+      <b>delivery_failed</b>). Показывает, какая машина реально приносит очки, а не только
+      тянет самый тяжёлый груз.</p>
+    <div id="rovers"></div>
   </section>
 
   <section>
-    <h2>Воронка: начал уровень → прошёл</h2>
-    <p class="caption">Сколько уникальных игроков дошло от старта уровня (<b>gameplay_start</b>)
-      до победы (<b>gameplay_win</b>). Процент показывает, какая доля дошла до следующего шага —
-      это и есть «конверсия».</p>
+    <h2>Популярность маршрутов</h2>
+    <p class="caption">Сколько раз каждый маршрут (безопасный/быстрый/экономичный до конкретной точки)
+      был реально запущен — по событию <b>delivery_started</b>.</p>
+    <div id="routes"></div>
+  </section>
+
+  <section>
+    <h2>Причины отказа в запуске</h2>
+    <p class="caption">Почему игра не дала стартовать доставке — по коду причины из
+      <b>delivery_rejected</b>: перегруз (<span class="pill">capacity_exceeded</span>), нехватка
+      заряда (<span class="pill">insufficient_battery</span>), занятый ровер и т.д.</p>
+    <div id="rejections"></div>
+  </section>
+
+  <section>
+    <h2>Воронка: выбор заказа → запуск → успех</h2>
+    <p class="caption">Сколько уникальных игровых сессий дошло от выбора заказа
+      (<b>order_selected</b>) через запуск доставки (<b>delivery_started</b>) до успешного
+      завершения (<b>delivery_completed</b>). Процент — доля, дошедшая до следующего шага.</p>
     <div id="funnel"></div>
     <div class="winrate" id="winrate"></div>
+  </section>
+
+  <section>
+    <h2>Типы событий</h2>
+    <p class="caption">Из чего состоит поток телеметрии игры. Чем длиннее полоса — тем чаще
+      игроки совершают это действие.</p>
+    <div id="types"></div>
   </section>
 
   <section>
@@ -170,7 +194,7 @@
   </section>
 
   <div class="foot">
-    Praktika · Game Analytics Pipeline<br/>
+    Praktika · Lunar Dispatch — backend-pipeline игровой аналитики<br/>
     Дашборд читает данные из ClickHouse в реальном времени. Период выборки — последние 90 дней.
   </div>
 
@@ -205,29 +229,53 @@
       ).join("");
     }
 
-    function countOf(types, name) {
-      const row = types.find(r => r.event_type === name);
-      return row ? row.events : 0;
-    }
-    function sumOf(types, names) {
-      return names.reduce((acc, n) => acc + countOf(types, n), 0);
-    }
-
-    function renderGameCards(types) {
-      const purchases = countOf(types, "purchase_success");
-      const ads = sumOf(types, ["interstitial_ad_show", "rewarded_ad_show"]);
-      const wins = countOf(types, "gameplay_win");
-      const losses = countOf(types, "gameplay_lose");
-      const winRate = pct(wins, wins + losses);
+    function renderDeliveryCards(overview) {
+      const started = overview.deliveries_started || 0;
+      const succeeded = overview.deliveries_succeeded || 0;
+      const failed = overview.deliveries_failed || 0;
+      const rejected = overview.deliveries_rejected || 0;
+      const successRate = pct(succeeded, succeeded + failed);
+      const avgRisk = overview.avg_risk != null ? Math.round(overview.avg_risk * 100) + "%" : "—";
       const cards = [
-        ["accent2", "Успешных покупок", fmt(purchases), "событий purchase_success"],
-        ["accent3", "Показов рекламы", fmt(ads), "межстраничная + с наградой"],
-        ["accent2", "Винрейт", winRate + "%", "побед из всех попыток уровня"],
-        ["", "Проигрышей", fmt(losses), "событий gameplay_lose"],
+        ["", "Запущено доставок", fmt(started), "событий delivery_started"],
+        ["accent2", "Доля успеха", successRate + "%", `${fmt(succeeded)} успешных из ${fmt(succeeded + failed)} завершённых`],
+        ["", "Провалено", fmt(failed), "событий delivery_failed"],
+        ["accent3", "Отклонено при запуске", fmt(rejected), "delivery_rejected — не хватило веса/батареи/ровера"],
+        ["", "Средний риск рейса", avgRisk, "по прогнозу на момент запуска"],
+        ["", "Средний расход батареи", fmt(overview.avg_energy_cost), "единиц на рейс"],
+        ["accent2", "Кредиты из доставок", fmt(overview.credits_from_deliveries), "сумма наград за успешные доставки"],
       ];
-      $("game-cards").innerHTML = cards.map(([cls, t, v, h]) =>
+      $("delivery-cards").innerHTML = cards.map(([cls, t, v, h]) =>
         `<div class="card ${cls}"><div class="value">${v}</div><div class="title">${t}</div><div class="hint">${h}</div></div>`
       ).join("");
+    }
+
+    function renderBarList(elementId, rows, labelKey, valueKey, emptyHint) {
+      const el = $(elementId);
+      if (!rows.length) { el.innerHTML = `<div class="sub">${emptyHint}</div>`; return; }
+      const max = Math.max(...rows.map(r => r[valueKey]));
+      el.innerHTML = rows.map(r => {
+        const p = max ? (r[valueKey] / max * 100) : 0;
+        return `<div class="bar-row">
+          <div class="bar-label" title="${r[labelKey]}">${r[labelKey] || "—"}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:${p}%"></div></div>
+          <div class="bar-count">${fmt(r[valueKey])}</div>
+        </div>`;
+      }).join("");
+    }
+
+    function renderRovers(rows) {
+      const el = $("rovers");
+      if (!rows.length) { el.innerHTML = '<div class="sub">нет данных — запустите хотя бы одну доставку в игре</div>'; return; }
+      el.innerHTML = rows.map(r => {
+        const total = r.succeeded + r.failed;
+        const rate = pct(r.succeeded, total);
+        return `<div class="bar-row">
+          <div class="bar-label" title="${r.rover_id}">${r.rover_id || "—"}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:${rate}%"></div></div>
+          <div class="bar-count">${rate}% (${fmt(total)})</div>
+        </div>`;
+      }).join("");
     }
 
     function renderTypes(rows) {
@@ -277,17 +325,24 @@
     async function load() {
       $("err").style.display = "none";
       try {
-        const [summary, types, funnel, recent] = await Promise.all([
+        const [summary, types, funnel, recent, overview, rovers, routes, rejections] = await Promise.all([
           getJSON("/metrics/summary?since_hours=2160"),
           getJSON("/metrics/event-types?since_hours=2160&limit=20"),
           getJSON("/metrics/funnel?since_hours=2160"),
           getJSON("/metrics/recent-events?limit=15"),
+          getJSON("/metrics/deliveries/overview?since_hours=2160"),
+          getJSON("/metrics/deliveries/rovers?since_hours=2160"),
+          getJSON("/metrics/deliveries/routes?since_hours=2160"),
+          getJSON("/metrics/deliveries/rejections?since_hours=2160"),
         ]);
         renderCards(summary);
-        renderGameCards(types);
+        renderDeliveryCards(overview);
         renderTypes(types);
         renderFunnel(funnel);
         renderRecent(recent);
+        renderRovers(rovers);
+        renderBarList("routes", routes, "route_id", "launches", "нет данных — запустите доставку в игре");
+        renderBarList("rejections", rejections, "reason_code", "occurrences", "отказов пока не было — все попытки были допустимы");
         $("updated").textContent = new Date().toLocaleTimeString("ru-RU");
       } catch (e) {
         $("err").style.display = "block";

@@ -130,5 +130,23 @@ services:
       event-api:
         condition: service_started
 
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_GAME_API_MODE: mock
+        VITE_EVENT_API_URL: /events
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    depends_on:
+      event-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
 volumes:
   clickhouse_data:
