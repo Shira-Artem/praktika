@@ -1,0 +1,134 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.3.5
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092,OUTSIDE://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health -X brokers=localhost:9092 | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redpanda-init:
+    image: redpandadata/redpanda:v24.3.5
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if rpk topic describe game-events -X brokers=redpanda:9092 >/dev/null 2>&1; then
+          partitions="$$(rpk topic describe game-events -X brokers=redpanda:9092 | awk '/^PARTITIONS[[:space:]]/ {print $$2; exit}')"
+          partitions="$${partitions:-0}"
+          if [ "$$partitions" -lt 6 ]; then
+            rpk topic add-partitions game-events --num "$$((6 - partitions))" -X brokers=redpanda:9092
+          fi
+        else
+          rpk topic create game-events --partitions=6 --replicas=1 -X brokers=redpanda:9092
+        fi
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: "no"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: game_analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/init:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  event-api:
+    build: .
+    command: uvicorn event_api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      EVENT_API_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      EVENT_API_KAFKA_TOPIC: game-events
+      EVENT_API_MAX_BATCH_SIZE: 500
+    ports:
+      - "8010:8000"
+    restart: unless-stopped
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+
+  event-processor:
+    build: .
+    command: python -m event_processor.main
+    environment:
+      PROCESSOR_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      PROCESSOR_KAFKA_TOPIC: game-events
+      PROCESSOR_KAFKA_GROUP_ID: game-events-clickhouse-writer
+      PROCESSOR_BATCH_SIZE: 500
+      PROCESSOR_BATCH_FLUSH_INTERVAL_SECONDS: 2
+      PROCESSOR_CLICKHOUSE_HOST: clickhouse
+      PROCESSOR_CLICKHOUSE_PORT: 8123
+      PROCESSOR_CLICKHOUSE_DATABASE: game_analytics
+      PROCESSOR_CLICKHOUSE_USER: default
+      PROCESSOR_CLICKHOUSE_PASSWORD: ""
+    restart: unless-stopped
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+
+  analytics-api:
+    build: .
+    command: uvicorn analytics_api.main:app --host 0.0.0.0 --port 8001
+    environment:
+      ANALYTICS_CLICKHOUSE_HOST: clickhouse
+      ANALYTICS_CLICKHOUSE_PORT: 8123
+      ANALYTICS_CLICKHOUSE_DATABASE: game_analytics
+      ANALYTICS_CLICKHOUSE_USER: default
+      ANALYTICS_CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8001:8001"
+    # dev: правки дашборда применяются без пересборки образа (файл читается на каждый запрос)
+    volumes:
+      - ./src/analytics_api/static:/usr/local/lib/python3.12/site-packages/analytics_api/static:ro
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  event-generator:
+    build: .
+    profiles: ["tools"]
+    command: python -m event_generator.main
+    environment:
+      GENERATOR_EVENT_API_URL: http://event-api:8000
+      GENERATOR_TOTAL_EVENTS: 1000
+      GENERATOR_BATCH_SIZE: 100
+      GENERATOR_REQUEST_DELAY_SECONDS: 0.1
+      GENERATOR_PLAYERS: 100
+      GENERATOR_GAME_ID: arena_escape
+    depends_on:
+      event-api:
+        condition: service_started
+
+volumes:
+  clickhouse_data:
